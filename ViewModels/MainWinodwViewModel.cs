@@ -5,6 +5,9 @@ using System.ComponentModel.DataAnnotations;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Windows;
+using System.Windows.Data;
+using WPF_MockServer.Core;
 using WPF_MockServer.Models.DTOs;
 
 namespace WPF_MockServer.ViewModels
@@ -40,6 +43,9 @@ namespace WPF_MockServer.ViewModels
         [ObservableProperty]
         private DeviceDataStruct selectedDevice;
 
+        private readonly Dictionary<int, MockDevice> _activeDevices = new();
+        private readonly object _logsLock = new();
+
         public MainWinodwViewModel()
         {
             LoadIpAddresses();
@@ -49,36 +55,56 @@ namespace WPF_MockServer.ViewModels
         [RelayCommand]
         public void AddDevice()
         {
-            int deviceId = devices.Count + 1;
+            int deviceId = devices.Count > 0 ? devices.Max(d => d.Id) + 1 : 1;
 
-            DeviceDataStruct device = new DeviceDataStruct()
+            var deviceDto = new DeviceDataStruct
             {
                 Id = deviceId,
                 BindIp = SelectedBindIp,
                 BindPort = BindPort,
-                DstIp = dstIpString,
-                DstPort = dstPortString,
-                IsUdp = isSelectedUdp
+                DstIp = DstIpString,
+                DstPort = DstPortString,
+                IsUdp = IsSelectedUdp
             };
 
-            devices.Add(device);
+            // 백그라운드 스레드에서 logs 컬렉션에 추가해도 크래시되지 않도록 활성화
+            BindingOperations.EnableCollectionSynchronization(deviceDto.logs, _logsLock);
 
-            SelectedDevice = devices.FirstOrDefault();
+            // 실제 MockDevice 코어 인스턴스 생성 및 연결
+            var mockDevice = new MockDevice(deviceId, deviceDto.BindIp, int.Parse(deviceDto.BindPort),
+                                            deviceDto.DstIp, int.Parse(deviceDto.DstPort), deviceDto.IsUdp);
 
-            BindPort = GetRandomAvailablePort().ToString();
+            mockDevice.OnLogMessage += (msg) =>
+            {
+                Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    deviceDto.logs.Add(new LogDataItem
+                    {
+                        TimeStamp = DateTime.Now.ToString("HH:mm:ss.fff"),
+                        Type = msg
+                    });
+                });
+            };
+
+            mockDevice.Start();
+            _activeDevices[deviceId] = mockDevice;
+
+            devices.Add(deviceDto);
+            SelectedDevice = deviceDto;
         }
 
         [RelayCommand]
         public void DeleteDevice(int deviceId)
         {
-            devices.RemoveAt(deviceId - 1);
-
-            for (int i = 0; i < devices.Count; i++)
+            var target = devices.FirstOrDefault(d => d.Id == deviceId);
+            if (target != null)
             {
-                devices[i].Id = i+1;
+                if (_activeDevices.Remove(deviceId, out var mockDevice))
+                {
+                    mockDevice.Dispose();
+                }
+                devices.Remove(target);
             }
-
-            SelectedDevice = devices.FirstOrDefault();
         }
 
         /// <summary>
